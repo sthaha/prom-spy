@@ -7,11 +7,35 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-type mux struct{}
+type mw struct {
+	next http.Handler
+}
 
-func (m mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+type responseSpy struct {
+	wrap http.ResponseWriter
+	body string
+}
+
+var _ http.ResponseWriter = (*responseSpy)(nil)
+
+func (spy *responseSpy) Write(b []byte) (int, error) {
+	spy.body = spy.body + string(b)
+	return spy.wrap.Write(b)
+}
+
+func (spy *responseSpy) Header() http.Header {
+	return spy.wrap.Header()
+}
+
+func (spy *responseSpy) WriteHeader(s int) {
+	spy.wrap.WriteHeader(s)
+}
+
+func (m mw) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	sb := strings.Builder{}
 
@@ -23,20 +47,29 @@ func (m mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sb.WriteString("\n")
 	}
 
+	ts := time.Now()
+
+	r.Header["Accept-Encoding"] = []string{"deflate"}
+	spy := &responseSpy{wrap: w}
+
+	m.next.ServeHTTP(spy, r)
+
 	fmt.Fprintf(os.Stderr, `
 Time: %v
 %s %s
 Host: %s
 Headers:
 %s
+		------------------------------
+%s
 _____________________________________________
-	`, time.Now(), r.Method, r.URL, r.Host, sb.String())
-	w.WriteHeader(200)
-	w.Write([]byte("foobar"))
+	`, ts, r.Method, r.URL, r.Host, sb.String(), spy.body)
 }
 
-var _ http.Handler = (*mux)(nil)
+var _ http.Handler = (*mw)(nil)
 
 func main() {
-	log.Fatal(http.ListenAndServe(":8080", &mux{}))
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", &mw{promhttp.Handler()})
+	log.Fatal(http.ListenAndServe(":8080", mux))
 }
